@@ -1,0 +1,49 @@
+name: release
+
+# Собирает Windows-бинарник и прикладывает его к GitHub Release.
+# Триггеры: пуш тега вида v1.2.3, либо ручной запуск.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package (zip)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\mobarust.exe dist\
+          Copy-Item README.md dist\
+          Compress-Archive -Path dist\* -DestinationPath mobarust-windows-x86_64.zip -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobarust-windows-x86_64
+          path: mobarust-windows-x86_64.zip
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobarust-windows-x86_64.zip
+          generate_release_notes: true
