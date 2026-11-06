@@ -1,8 +1,8 @@
 [package]
 name = "mobarust"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-description = "Кроссплатформенный SSH/терминальный клиент в духе MobaXterm, на Rust + egui"
+description = "Быстрый нативный SSH-клиент для Windows в духе MobaXterm: Rust + egui + russh"
 
 [dependencies]
 eframe = "0.37.0"
@@ -16,12 +16,18 @@ directories = "6.0.0"
 
 # SSH (optional — отключается сборкой --no-default-features)
 # crypto-бэкенд ring: стабильно собирается на Windows CI (без NASM/CMake).
-russh = { version = "0.65.1", default-features = false, features = ["flate2", "ring", "rsa"], optional = true }
+russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa"], optional = true }
 tokio = { version = "1.54.1", features = ["rt", "macros", "io-util", "net", "sync", "time"], optional = true }
+russh-sftp = { version = "3.0.1", optional = true }
+arboard = { version = "3.7.0", default-features = false }
+
+# Шифрование сохранённых паролей через DPAPI (привязка к учётке Windows).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
 
 [features]
 default = ["ssh"]
-ssh = ["dep:russh", "dep:tokio"]
+ssh = ["dep:russh", "dep:tokio", "dep:russh-sftp"]
 
 [profile.release]
 opt-level = 3

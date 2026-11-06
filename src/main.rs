@@ -5,9 +5,14 @@
 // В debug консоль остаётся — удобно для логов.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#![cfg_attr(not(feature = "ssh"), allow(dead_code))]
+
 mod app;
 mod config;
+mod secrets;
+mod sshconfig;
 mod terminal;
+mod ui;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
