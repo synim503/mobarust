@@ -1,6 +1,6 @@
 [package]
 name = "mobarust"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Кроссплатформенный SSH/терминальный клиент в духе MobaXterm, на Rust + egui"
 
@@ -25,4 +25,7 @@ ssh = ["dep:russh", "dep:tokio"]
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind"

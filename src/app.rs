@@ -1,11 +1,10 @@
-//! UI приложения на egui: тулбар, менеджер сессий, вкладки терминалов,
-//! статус-бар и диалог подключения.
+//! UI приложения на egui: тулбар, менеджер сессий с папками, вкладки
+//! терминалов, статус-бар и диалог подключения (пароль / ключ).
 
-use crate::config::{Config, SessionDef, SessionKind};
+use crate::config::{AuthMethod, Config, SessionDef, SessionKind};
 use crate::terminal::{self, TermSession};
 use std::collections::BTreeMap;
 
-/// Что показано в левой панели снизу.
 #[derive(PartialEq)]
 enum SideTab {
     Sessions,
@@ -19,21 +18,61 @@ struct SshForm {
     host: String,
     user: String,
     port: String,
+    folder: String,
+    use_key: bool,
+    key_path: String,
     password: String,
-    save: bool,
+    passphrase: String,
 }
 
 impl SshForm {
-    fn from_def(name: &str, host: &str, user: &str, port: u16) -> Self {
+    fn empty() -> Self {
         Self {
-            name: name.to_string(),
-            host: host.to_string(),
-            user: user.to_string(),
-            port: port.to_string(),
+            name: String::new(),
+            host: String::new(),
+            user: String::new(),
+            port: "22".into(),
+            folder: "SSH".into(),
+            use_key: false,
+            key_path: default_key_path(),
             password: String::new(),
-            save: false,
+            passphrase: String::new(),
         }
     }
+
+    fn quick(user: &str, host: &str, port: u16) -> Self {
+        Self {
+            user: user.into(),
+            host: host.into(),
+            port: port.to_string(),
+            ..Self::empty()
+        }
+    }
+
+    fn from_def(def: &SessionDef) -> Self {
+        let mut f = Self::empty();
+        f.name = def.name.clone();
+        f.folder = def.group.clone();
+        if let SessionKind::Ssh { host, port, user, auth } = &def.kind {
+            f.host = host.clone();
+            f.user = user.clone();
+            f.port = port.to_string();
+            if let AuthMethod::Key { path } = auth {
+                f.use_key = true;
+                f.key_path = path.clone();
+            }
+        }
+        f
+    }
+}
+
+fn default_key_path() -> String {
+    directories::UserDirs::new()
+        .and_then(|d| {
+            let p = d.home_dir().join(".ssh").join("id_ed25519");
+            p.to_str().map(|s| s.to_string())
+        })
+        .unwrap_or_default()
 }
 
 pub struct MobaApp {
@@ -43,6 +82,7 @@ pub struct MobaApp {
     omnibox: String,
     side_tab: SideTab,
     ssh_form: Option<SshForm>,
+    new_folder: Option<String>,
     status: String,
 }
 
@@ -56,6 +96,7 @@ impl MobaApp {
             omnibox: String::new(),
             side_tab: SideTab::Sessions,
             ssh_form: None,
+            new_folder: None,
             status: "Готов".into(),
         }
     }
@@ -76,34 +117,39 @@ impl MobaApp {
     #[cfg(feature = "ssh")]
     fn open_ssh(&mut self, form: &SshForm) {
         let port: u16 = form.port.trim().parse().unwrap_or(22);
+        let auth = if form.use_key {
+            terminal::ssh::SshAuth::Key {
+                path: form.key_path.clone(),
+                passphrase: form.passphrase.clone(),
+            }
+        } else {
+            terminal::ssh::SshAuth::Password(form.password.clone())
+        };
         let params = terminal::ssh::SshParams {
             host: form.host.clone(),
             port,
             user: form.user.clone(),
-            password: form.password.clone(),
+            auth,
         };
-        let title = if form.name.is_empty() {
+        let title = if form.name.trim().is_empty() {
             format!("{}@{}", form.user, form.host)
         } else {
-            form.name.clone()
+            form.name.trim().to_string()
         };
         let sess = terminal::ssh::spawn(&title, params, 24, 80);
         self.tabs.push(sess);
         self.active = Some(self.tabs.len() - 1);
         self.status = format!("SSH → {}:{}", form.host, port);
 
-        if form.save && !self.cfg.sessions.iter().any(|s| matches!(&s.kind,
-            SessionKind::Ssh { host, user, .. } if host == &form.host && user == &form.user))
-        {
-            let id = self.cfg.alloc_id();
-            self.cfg.sessions.push(SessionDef {
-                id,
-                name: title,
-                group: "SSH".into(),
-                kind: SessionKind::Ssh { host: form.host.clone(), port, user: form.user.clone() },
-            });
-            self.cfg.save();
-        }
+        // Авто-сохранение сессии (без секретов).
+        let folder = if form.folder.trim().is_empty() { "SSH" } else { form.folder.trim() };
+        let auth_persist = if form.use_key {
+            AuthMethod::Key { path: form.key_path.clone() }
+        } else {
+            AuthMethod::Password
+        };
+        self.cfg.upsert_ssh(&title, folder, &form.host, port, &form.user, auth_persist);
+        self.cfg.save();
     }
 
     #[cfg(not(feature = "ssh"))]
@@ -111,12 +157,11 @@ impl MobaApp {
         self.status = "SSH отключён при сборке".into();
     }
 
-    /// Открыть сохранённую сессию из дерева.
     fn open_def(&mut self, def: &SessionDef) {
         match &def.kind {
             SessionKind::Local { shell } => self.open_local(&def.name, shell.clone()),
-            SessionKind::Ssh { host, port, user } => {
-                self.ssh_form = Some(SshForm::from_def(&def.name, host, user, *port));
+            SessionKind::Ssh { .. } => {
+                self.ssh_form = Some(SshForm::from_def(def));
             }
         }
     }
@@ -124,15 +169,14 @@ impl MobaApp {
     fn close_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.tabs.remove(idx);
-            if self.tabs.is_empty() {
-                self.active = None;
+            self.active = if self.tabs.is_empty() {
+                None
             } else {
-                self.active = Some(idx.min(self.tabs.len() - 1));
-            }
+                Some(idx.min(self.tabs.len() - 1))
+            };
         }
     }
 
-    /// Разобрать строку быстрого подключения: [ssh://]user@host[:port].
     fn parse_conn(s: &str) -> Option<(String, String, u16)> {
         let s = s.trim();
         let s = s.strip_prefix("ssh://").unwrap_or(s);
@@ -154,16 +198,14 @@ impl MobaApp {
             ui.label(egui::RichText::new("▸_ MobaRust").strong().size(15.0));
             ui.add_space(6.0);
 
-            // быстрое подключение
-            let hint = egui::RichText::new("user@host:port — Enter").weak();
             let edit = egui::TextEdit::singleline(&mut self.omnibox)
-                .hint_text(hint)
+                .hint_text(egui::RichText::new("user@host:port — Enter").weak())
                 .desired_width(320.0)
                 .font(egui::TextStyle::Monospace);
             let resp = ui.add(edit);
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 if let Some((user, host, port)) = Self::parse_conn(&self.omnibox) {
-                    self.ssh_form = Some(SshForm::from_def("", &host, &user, port));
+                    self.ssh_form = Some(SshForm::quick(&user, &host, port));
                     self.omnibox.clear();
                 } else {
                     self.status = "Неверный формат. Пример: deploy@10.0.0.1:22".into();
@@ -174,7 +216,7 @@ impl MobaApp {
                 if ui.button("⚙").on_hover_text("Настройки").clicked() {}
                 if ui.button("MultiExec").on_hover_text("Ввод во все вкладки (скоро)").clicked() {}
                 if ui.button("＋ SSH").clicked() {
-                    self.ssh_form = Some(SshForm::from_def("", "", "", 22));
+                    self.ssh_form = Some(SshForm::empty());
                 }
                 if ui
                     .add(egui::Button::new("＋ Локальный шелл").fill(egui::Color32::from_rgb(0x4a, 0xa8, 0xff)))
@@ -188,11 +230,49 @@ impl MobaApp {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("СЕССИИ").weak().small());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("СЕССИИ").weak().small());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("＋ Папка").on_hover_text("Новая папка").clicked() {
+                    self.new_folder = Some(String::new());
+                }
+            });
+        });
+
+        // Инлайн-ввод имени новой папки.
+        if let Some(name) = self.new_folder.as_mut() {
+            let mut commit = false;
+            let mut cancel = false;
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(name).hint_text("имя папки").desired_width(140.0),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    commit = true;
+                }
+                if ui.small_button("✓").clicked() {
+                    commit = true;
+                }
+                if ui.small_button("✕").clicked() {
+                    cancel = true;
+                }
+            });
+            let folder_name = name.trim().to_string();
+            if commit && !folder_name.is_empty() {
+                self.cfg.ensure_folder(&folder_name);
+                self.cfg.save();
+                self.new_folder = None;
+            } else if cancel {
+                self.new_folder = None;
+            }
+        }
         ui.separator();
 
-        // Группировка по полю group.
+        // Группировка сессий по папкам (показываем и пустые папки).
         let mut groups: BTreeMap<String, Vec<SessionDef>> = BTreeMap::new();
+        for f in self.cfg.all_folders() {
+            groups.entry(f).or_default();
+        }
         for s in &self.cfg.sessions {
             groups.entry(s.group.clone()).or_default().push(s.clone());
         }
@@ -203,12 +283,14 @@ impl MobaApp {
                 egui::CollapsingHeader::new(egui::RichText::new(format!("📁 {group}")).strong())
                     .default_open(true)
                     .show(ui, |ui| {
+                        if items.is_empty() {
+                            ui.label(egui::RichText::new("  пусто").weak().small());
+                        }
                         for def in items {
-                            let label = format!("  {}", def.name);
                             let resp = ui
-                                .selectable_label(false, label)
+                                .selectable_label(false, format!("  {}", def.name))
                                 .on_hover_text(def.host_label());
-                            if resp.double_clicked() || resp.clicked() {
+                            if resp.clicked() || resp.double_clicked() {
                                 to_open = Some(def.clone());
                             }
                         }
@@ -233,14 +315,10 @@ impl MobaApp {
         ui.horizontal(|ui| {
             let mut close: Option<usize> = None;
             for i in 0..self.tabs.len() {
-                let alive = self.tabs[i].is_alive();
-                let dot = if alive { "🟢" } else { "⚫" };
+                let dot = if self.tabs[i].is_alive() { "🟢" } else { "⚫" };
                 let title = self.tabs[i].title.clone();
                 let selected = self.active == Some(i);
-                if ui
-                    .selectable_label(selected, format!("{dot} {title}"))
-                    .clicked()
-                {
+                if ui.selectable_label(selected, format!("{dot} {title}")).clicked() {
                     self.active = Some(i);
                 }
                 if ui.small_button("✕").clicked() {
@@ -273,7 +351,11 @@ impl MobaApp {
     }
 
     fn ssh_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.ssh_form.is_some();
+        if self.ssh_form.is_none() {
+            return;
+        }
+        let folders = self.cfg.all_folders();
+        let mut open = true;
         let mut do_connect = false;
         let mut do_cancel = false;
 
@@ -297,11 +379,46 @@ impl MobaApp {
                         ui.label("Порт");
                         ui.text_edit_singleline(&mut form.port);
                         ui.end_row();
-                        ui.label("Пароль");
-                        ui.add(egui::TextEdit::singleline(&mut form.password).password(true));
+                        ui.label("Папка");
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("folder_combo")
+                                .selected_text(form.folder.clone())
+                                .show_ui(ui, |ui| {
+                                    for f in &folders {
+                                        ui.selectable_value(&mut form.folder, f.clone(), f);
+                                    }
+                                });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut form.folder)
+                                    .desired_width(110.0)
+                                    .hint_text("или новая"),
+                            );
+                        });
                         ui.end_row();
                     });
-                    ui.checkbox(&mut form.save, "Сохранить сессию (без пароля)");
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Аутентификация:");
+                        ui.radio_value(&mut form.use_key, false, "Пароль");
+                        ui.radio_value(&mut form.use_key, true, "Ключ");
+                    });
+
+                    egui::Grid::new("auth_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        if form.use_key {
+                            ui.label("Файл ключа");
+                            ui.text_edit_singleline(&mut form.key_path);
+                            ui.end_row();
+                            ui.label("Passphrase");
+                            ui.add(egui::TextEdit::singleline(&mut form.passphrase).password(true));
+                            ui.end_row();
+                        } else {
+                            ui.label("Пароль");
+                            ui.add(egui::TextEdit::singleline(&mut form.password).password(true));
+                            ui.end_row();
+                        }
+                    });
+
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Подключиться").clicked() {
@@ -323,13 +440,9 @@ impl MobaApp {
         }
     }
 
-    /// Собрать ввод с клавиатуры и отправить в активный терминал.
     fn pump_input(&mut self, ctx: &egui::Context) {
         let Some(i) = self.active else { return };
-        if ctx.egui_wants_keyboard_input() {
-            return; // фокус в поле ввода UI — не перехватываем
-        }
-        if self.ssh_form.is_some() {
+        if ctx.egui_wants_keyboard_input() || self.ssh_form.is_some() || self.new_folder.is_some() {
             return;
         }
         let mut out: Vec<u8> = Vec::new();
@@ -409,17 +522,16 @@ impl eframe::App for MobaApp {
 
         self.ssh_dialog(&ctx);
 
-        // Перерисовка: если есть живой вывод — чаще, иначе реже (мигание курсора).
+        // Перерисовка: по готовности вывода — сразу; иначе редко (мигание курсора).
         let any_dirty = self.tabs.iter().any(|t| t.take_dirty());
         if any_dirty {
             ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        } else if self.active.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
     }
 }
 
-/// Тёмная тема «терминального IDE».
 fn install_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(0x16, 0x1b, 0x22);

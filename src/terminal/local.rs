@@ -4,7 +4,7 @@ use super::{Msg, TermSession, Writer};
 use anyhow::Result;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn default_shell() -> String {
@@ -40,6 +40,7 @@ pub fn spawn(title: &str, shell: Option<String>, rows: u16, cols: u16) -> Result
     )));
     let dirty = Arc::new(AtomicBool::new(true));
     let alive = Arc::new(AtomicBool::new(true));
+    let generation = Arc::new(AtomicU64::new(1));
     let (tx, rx) = std::sync::mpsc::channel::<Msg>();
 
     // Поток чтения вывода PTY → парсер.
@@ -47,6 +48,7 @@ pub fn spawn(title: &str, shell: Option<String>, rows: u16, cols: u16) -> Result
         let parser = parser.clone();
         let dirty = dirty.clone();
         let alive = alive.clone();
+        let generation = generation.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -56,6 +58,7 @@ pub fn spawn(title: &str, shell: Option<String>, rows: u16, cols: u16) -> Result
                         if let Ok(mut p) = parser.lock() {
                             p.process(&buf[..n]);
                         }
+                        generation.fetch_add(1, Ordering::SeqCst);
                         dirty.store(true, Ordering::SeqCst);
                     }
                 }
@@ -88,14 +91,15 @@ pub fn spawn(title: &str, shell: Option<String>, rows: u16, cols: u16) -> Result
         let _ = child.wait();
     });
 
-    Ok(TermSession {
-        title: title.to_string(),
-        kind_label: "local".into(),
+    Ok(TermSession::new(
+        title.to_string(),
+        "local",
         parser,
         dirty,
         alive,
+        generation,
         rows,
         cols,
-        writer: Writer::Std(tx),
-    })
+        Writer::Std(tx),
+    ))
 }

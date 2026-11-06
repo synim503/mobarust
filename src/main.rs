@@ -1,6 +1,10 @@
 // MobaRust — кроссплатформенный терминальный / SSH клиент.
 // Точка входа: поднимает окно eframe и отдаёт управление MobaApp.
 
+// В release-сборке под Windows не открывать окно консоли (cmd).
+// В debug консоль остаётся — удобно для логов.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod config;
 mod terminal;
