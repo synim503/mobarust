@@ -9,6 +9,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза (создаётся, если нет)"
+        default: "v0.1.0"
+        required: true
 
 permissions:
   contents: write
@@ -43,9 +48,10 @@ jobs:
           name: mobarust-windows-x86_64
           path: mobarust-windows-x86_64.zip
 
-      - name: Attach to GitHub Release
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+      - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: MobaRust ${{ inputs.tag || github.ref_name }}
           files: mobarust-windows-x86_64.zip
           generate_release_notes: true
